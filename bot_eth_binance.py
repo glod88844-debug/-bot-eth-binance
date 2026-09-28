@@ -1,25 +1,73 @@
-import ccxt, pandas as pd, os
-from ta.trend import EMAIndicator
-from ta.momentum import RSIIndicator
-SYMBOL='ETH/USDT'; LEVERAGE=3; USDT_AMOUNT=50
-TP1=2.5; TP2=5.0; SL=2.0
-exchange=ccxt.binance({'apiKey':os.getenv('BINANCE_API_KEY'),'secret':os.getenv('BINANCE_API_SECRET'),'options':{'defaultType':'future'}})
+import ccxt, os, pandas as pd, ta
+
+KEY=os.getenv('BINANCE_API_KEY')
+SECRET=os.getenv('BINANCE_API_SECRET')
+SYMBOL='ETH/USDC'
+
+exchange = ccxt.binance({
+    'apiKey': KEY,
+    'secret': SECRET,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'spot',
+        'fetchCurrencies': False,
+        'adjustForTimeDifference': True
+    },
+    'urls': {
+        'api': {
+            'public': 'https://data-api.binance.vision/api/v3',
+            'private': 'https://api.binance.com/api/v3',
+            'sapi': 'https://api.binance.com/sapi/v1',
+        }
+    }
+})
+
 def check():
- candles=exchange.fetch_ohlcv(SYMBOL,'2h',limit=100)
- df=pd.DataFrame(candles,columns=['time','open','high','low','close','vol'])
- df['ema20']=EMAIndicator(df['close'],20).ema_indicator()
- df['ema50']=EMAIndicator(df['close'],50).ema_indicator()
- df['rsi']=RSIIndicator(df['close'],14).rsi()
- last=df.iloc[-1]; prev=df.iloc[-2]
- if prev['ema20']<prev['ema50'] and last['ema20']>last['ema50'] and last['rsi']>50:
-  price=exchange.fetch_ticker(SYMBOL)['last']
-  qty=(USDT_AMOUNT*LEVERAGE)/price
-  exchange.set_leverage(LEVERAGE,SYMBOL)
-  exchange.create_market_buy_order(SYMBOL,qty)
-  exchange.create_order(SYMBOL,'TAKE_PROFIT_MARKET','sell',qty*0.6,None,{'stopPrice':price*(1+TP1/100)})
-  exchange.create_order(SYMBOL,'TAKE_PROFIT_MARKET','sell',qty*0.4,None,{'stopPrice':price*(1+TP2/100)})
-  exchange.create_order(SYMBOL,'STOP_MARKET','sell',qty,None,{'stopPrice':price*(1-SL/100)})
-  print("COMPRA EJECUTADA")
- else:
-  print("No hay señal")
+    try:
+        exchange.load_markets()
+        candles=exchange.fetch_ohlcv(SYMBOL, '2h', limit=100)
+    except Exception as e:
+        print(f"Error fetch OHLCV con binance.vision, probando con api.binance.com: {e}")
+        # fallback sin el truco de vision
+        exchange2 = ccxt.binance({
+            'apiKey': KEY, 'secret': SECRET,
+            'enableRateLimit': True,
+            'options': {'defaultType':'spot','fetchCurrencies':False}
+        })
+        candles=exchange2.fetch_ohlcv(SYMBOL, '2h', limit=100)
+
+    df=pd.DataFrame(candles, columns=['t','o','h','l','c','v'])
+    df['rsi']=ta.momentum.RSIIndicator(df['c']).rsi()
+    df['ema200']=ta.trend.EMAIndicator(df['c'], 200).ema_indicator()
+    
+    last=df.iloc[-1]
+    price=last['c']
+    rsi=last['rsi']
+    ema=last['ema200']
+    
+    print(f"Precio: {price} RSI: {rsi} EMA200: {ema}")
+    
+    if rsi < 30 and price > ema:
+        print("SEÑAL DE COMPRA!")
+        try:
+            bal=exchange.fetch_balance()
+            usdc=bal['USDC']['free'] if 'USDC' in bal else 0
+            print(f"USDC disponible: {usdc}")
+            if usdc > 11:
+                order=exchange.create_market_buy_order(SYMBOL, 11/usdc*usdc/price) # compra 11 USDC
+                # más simple: comprar 11 USDC en ETH
+                # order=exchange.create_market_buy_order(SYMBOL, 11/price)
+                print(f"COMPRA EJECUTADA: {order}")
+            else:
+                # intenta comprar con todo si es menos de 11
+                if usdc > 1:
+                    order=exchange.create_market_buy_order(SYMBOL, usdc*0.99/price)
+                    print(f"COMPRA con saldo disponible: {order}")
+                else:
+                    print("Sin USDC suficiente")
+        except Exception as e:
+            print(f"Error en compra: {e}")
+    else:
+        print("No hay señal de compra")
+
 check()
